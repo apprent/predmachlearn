@@ -1,0 +1,179 @@
+---
+title: "Qualitative Personal Activity Recognition"
+subtitle: "PredMachLearn-030 Course Project"
+author: "Han Dehai"
+date: "Sunday, July 25, 2015"
+output: html_document
+---
+
+## Job description   
+   
+Using wearable devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, we use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har(http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).   
+
+The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set.    
+   
+   
+## Modelling   
+   
+For this problem, only the 53 variables that the testing data have are used for training and prediction.   
+The training dataset is splited into 10 folds to train 10 models seperatly as my old laptop can't handle the training work load using the whole dataset.   
+Cross validations are then carried on these 10 folds.   
+When using the random forest method, these 10 models actually have pretty good accuracies, i.e. between 94.14% and 95.46%.   
+When using *random forest* on 20 folds, accuracies are between 89.89% and 92.22%.   
+Methods of *naive bayes* (nb), *boosting with trees* (gbm) and *bagging* (bagFDA) were also tried on 10 folds, the accuracies were not as good as random forest.    
+It is decided to choose one model from the 10 random forest models by means of manual voting. After voting the accuracy should be no less than the highest (95.46%) among the original 10 models, so the out of sample error should be around 4.54%.     
+   
+```{r data_cleaning}
+library(caret, quietly = TRUE)
+
+training <- read.csv("pml-training.csv")
+testing  <- read.csv("pml-testing.csv")
+
+## First 7 variables are not from sensors, so they could not be used as predictors   
+training <- training[,-(1:7)]
+testing  <- testing[,-(1:7)]
+
+## NA testing   
+table(colSums(is.na(testing)))
+## 100 variables are totally missing, other 53 variables without NA   
+
+table(colSums(is.na(training)))
+## 67 variables have 19216 (98%) missing values, other 86 variables without NA
+
+## Use only 53 variables without NA
+trainUsed <- training[,which(colSums(is.na(testing))==0)]
+testUsed  <- testing[,which(colSums(is.na(testing))==0)]
+
+```
+
+
+```{r training}
+## My old laptop can't handle the training using the whole trainUsed dataset,
+## so split it into 10 folds and train 10 models seperately
+set.seed(2356)
+trainList <- list(NULL)
+n.folds <- 10
+folds <- createFolds(trainUsed$classe, k = n.folds)
+for(i in 1:n.folds){
+  trainList[[i]] <- trainUsed[folds[[i]],]
+}
+
+modFitList <- list(NULL)
+
+if(0){ ## don't want to run it every time compiling the Rmd file
+  for(i in 1:n.folds){
+    modFitList[[i]] <- train(classe ~ ., method = "rf", prox = TRUE, 
+                             data = trainList[[i]])
+    filename <- paste("modFit_", i, ".rds", sep = "")
+    saveRDS(modFitList[[i]], file = filename)
+  }
+  ## it costs about 22 minutes for each modFit, saving them for next time use
+}
+
+if(1){ ## just load the saved models
+  for(i in 1:n.folds){
+    filename <- paste("modFit_", i, ".rds", sep = "")
+    modFitList[[i]] <- readRDS(file = filename)
+  }
+}
+
+```
+
+
+```{r cross_validation}
+## cross validation of models on folds except the fold of itself
+cv.pred.acc <- as.numeric(NULL)
+for(i in 1:n.folds){
+  testData <- trainUsed[-folds[[i]],]
+  cv.pred <- predict(modFitList[[i]], testData)
+  cM <- confusionMatrix(cv.pred, testData$classe)
+  cv.pred.acc <- c(cv.pred.acc, cM$overall[1])
+}
+range(cv.pred.acc)
+
+```
+   
+   
+## Voting for the best model    
+   
+Measure and score for each model using their prediction result on the testing data, which has the most agreed result wins.   
+   
+```{r voting}
+## Get the 10 predictions using each modFit in each row of df.pred
+df.pred <- data.frame(NULL)
+for(i in 1:n.folds){
+  df.pred <- rbind(df.pred, predict(modFitList[[i]], testUsed))
+}
+
+## Name the 20 problems in each column of df.pred
+name.pred <- as.character(NULL)
+for(k in 1:20){
+  name.pred <- c(name.pred, paste("pb", k, sep = ""))
+}
+names(df.pred) <- name.pred
+
+## See what results each problem get
+df.pred <- as.data.frame(sapply(df.pred, as.factor))
+summary(df.pred)
+
+## Which modFit has the most agreement when predicting the 20 problems
+vt.pred <- as.data.frame(sapply(df.pred, as.integer))
+for(i in 1:20){
+  t.pred <- table(df.pred[,i])
+  ord.names.pred <- names(t.pred[order(t.pred, decreasing = T)])
+  for(j in 1:length(t.pred)){
+    ## which modFit agrees with the 1st majority get a score of 5
+    ## which modFit agrees with the 2nd majority get a score of 4
+    ## etc
+    vt.pred[df.pred[,i] == ord.names.pred[j], i] <- 6-j
+  }
+}
+## Scores of the 10 modFits
+vt.pred.mean <- apply(vt.pred, 1, mean)
+no.best.modFit <- which.max(vt.pred.mean)
+
+```
+   
+Here below shows the prediction results and model voting scores by fancy plots.    
+   
+```{r plot_voting}
+## Codes below show the voting scores
+library(reshape2)
+modFit.id <- row.names(df.pred)
+cp.df.pred <- cbind(modFit.id, df.pred)
+mt.df.pred <- melt(cp.df.pred, id = "modFit.id")
+names(mt.df.pred) <- c("modFit.id", "prob.id", "pred.result")
+
+cp.vt.pred <- cbind(modFit.id, vt.pred)
+mt.vt.pred <- melt(cp.vt.pred, id = "modFit.id")
+names(mt.vt.pred) <- c("modFit.id", "prob.id", "pred.score")
+
+m.pred <- merge(mt.df.pred, mt.vt.pred)
+m.pred$modFit.id <- factor(m.pred$modFit.id, 
+                           levels = order(vt.pred.mean, decreasing = T))
+
+library(ggplot2)
+## plot prediction results
+g_result <- ggplot(m.pred, aes(prob.id, modFit.id))
+g_result <- g_result + geom_point(aes(color = pred.result), size = 8, shape = 15)
+g_result + labs(list(title = "Prediction Results", x = "The 20 problems", 
+                     y = "The 10 models"))
+## plot model voting scores
+g_score <- ggplot(m.pred, aes(prob.id, modFit.id))
+g_score <- g_score + geom_point(aes(color = factor(pred.score), size = factor(pred.score)))
+g_score + labs(list(title = "Model Voting Scores", x = "The 20 problems", 
+                    y = "The 10 models"))
+
+```
+   
+It shows that the 9th and 10th model have same result and both score all 5 points on every problem.    
+That's definitely what we are looking for.   
+   
+    
+## Prediction   
+   
+```{r prediction}
+## prediction result of the best model
+predict(modFitList[[no.best.modFit]], testUsed)
+
+```
